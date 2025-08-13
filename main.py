@@ -47,6 +47,11 @@ class VehicleCountingGUI:
         self.csv_path = None
         self.real_time_data = []  # Store real-time data for CSV export
         
+        # Unique vehicle tracking
+        self.next_vehicle_id = 1  # Global counter for unique vehicle IDs
+        self.vehicle_id_mapping = {}  # Map tracker IDs to unique vehicle IDs
+        self.vehicle_first_seen = {}  # Track when each vehicle was first detected
+        
         # Colors for different lines
         self.line_colors = [
             (255, 0, 0),    # Red
@@ -152,6 +157,8 @@ class VehicleCountingGUI:
         self.display_rate_var = tk.IntVar(value=5)
         display_spinbox = ttk.Spinbox(perf_frame, from_=1, to=30, textvariable=self.display_rate_var, width=10)
         display_spinbox.pack(fill=tk.X, pady=2)
+        display_spinbox.bind('<KeyRelease>', self.on_display_settings_change)
+        display_spinbox.bind('<ButtonRelease-1>', self.on_display_settings_change)
         
         ttk.Label(perf_frame, text="Confidence Threshold:").pack(anchor=tk.W, pady=(10, 0))
         self.conf_threshold_var = tk.DoubleVar(value=0.2)
@@ -162,11 +169,20 @@ class VehicleCountingGUI:
         self.display_fps_var = tk.IntVar(value=30)
         fps_spinbox = ttk.Spinbox(perf_frame, from_=15, to=60, textvariable=self.display_fps_var, width=10)
         fps_spinbox.pack(fill=tk.X, pady=2)
+        fps_spinbox.bind('<KeyRelease>', self.on_display_settings_change)
+        fps_spinbox.bind('<ButtonRelease-1>', self.on_display_settings_change)
         
         ttk.Label(perf_frame, text="Processing Speed:").pack(anchor=tk.W, pady=(10, 0))
         self.speed_var = tk.StringVar(value="Ultra Fast")
         speed_combo = ttk.Combobox(perf_frame, textvariable=self.speed_var, values=["Ultra Fast", "Fast", "Normal", "Accurate"], state="readonly", width=10)
         speed_combo.pack(fill=tk.X, pady=2)
+        
+        # Add performance info
+        ttk.Label(perf_frame, text="Performance Info:", font=("Arial", 9, "bold")).pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(perf_frame, text="Ultra Fast: ~1min for 5min video", font=("Arial", 8)).pack(anchor=tk.W)
+        ttk.Label(perf_frame, text="Fast: ~2min for 5min video", font=("Arial", 8)).pack(anchor=tk.W)
+        ttk.Label(perf_frame, text="Normal: ~3min for 5min video", font=("Arial", 8)).pack(anchor=tk.W)
+        ttk.Label(perf_frame, text="Accurate: ~5min for 5min video", font=("Arial", 8)).pack(anchor=tk.W)
         
         # Add note about video speed
         ttk.Label(perf_frame, text="Note: Video plays at original speed", 
@@ -362,8 +378,8 @@ class VehicleCountingGUI:
             
             self.csv_writer.writerow(row)
             
-            # Flush every 10 rows for better performance
-            if frame_num % 10 == 0:
+            # Flush every 50 rows for better performance
+            if frame_num % 50 == 0:
                 self.csv_file.flush()
             
         except Exception as e:
@@ -667,6 +683,9 @@ class VehicleCountingGUI:
             messagebox.showerror("Error", "Could not initialize video writer")
             return
         
+        # Reset tracking data for new processing session
+        self.reset_tracking_data()
+        
         # Auto-start CSV logging if enabled
         if self.csv_logging_var.get() and not self.csv_writer:
             self.start_csv_logging()
@@ -692,64 +711,75 @@ class VehicleCountingGUI:
     def process_video(self):
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         
-        # Performance optimization settings
+        # Performance optimization settings from GUI
         display_rate = self.display_rate_var.get()  # Get from GUI
         display_fps = self.display_fps_var.get()  # Get from GUI
         speed_mode = self.speed_var.get()  # Get speed mode
         min_size = self.min_size_var.get()  # Get minimum vehicle size
         
-        # Video playback settings - play at 2x speed
+        # Video playback settings - ultra fast processing (no delay)
         original_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        target_fps = original_fps * 2  # 2x speed
-        frame_delay = 1.0 / target_fps if target_fps > 0 else 1.0 / 60.0  # 2x faster than original
+        # Remove frame delay for maximum processing speed
+        frame_delay = 0.0  # Process as fast as possible
         
-        # Adjust settings based on speed mode - optimized for 2x speed
+        # Adjust settings based on speed mode - optimized for ultra fast processing
         if speed_mode == "Ultra Fast":
-            skip_frames = 0  # Process every frame
+            skip_frames = 2  # Skip every 2nd frame for speed
             conf_threshold = 0.15
             min_area = min_size
-            model_size = 416  # Smaller input size for maximum speed
-            display_skip = 2  # Update display every 2 frames
+            model_size = 320  # Very small input size for maximum speed
         elif speed_mode == "Fast":
-            skip_frames = 0  # Process every frame
+            skip_frames = 1  # Skip every other frame
             conf_threshold = 0.2
             min_area = min_size
-            model_size = 480  # Smaller input size for speed
-            display_skip = 3  # Update display every 3 frames
+            model_size = 416  # Small input size for speed
         elif speed_mode == "Normal":
             skip_frames = 0  # Process every frame
             conf_threshold = 0.3
             min_area = min_size
-            model_size = 640
-            display_skip = 4  # Update display every 4 frames
+            model_size = 480
         else:  # Accurate
             skip_frames = 0  # Process every frame
             conf_threshold = 0.4
             min_area = min_size
             model_size = 640
-            display_skip = 5  # Update display every 5 frames
+        
+        # Calculate display update frequency based on GUI settings
+        display_skip = max(1, display_rate)  # Use GUI display rate setting
+        display_fps_limit = max(1, display_fps)  # Use GUI display FPS setting
         
         frame_interval = 0
         last_display_time = time.time()
         processed_frames = 0
-        display_interval = max(1, 60 // display_fps)  # Calculate display interval
+        display_interval = max(1, 60 // display_fps_limit)  # Calculate display interval based on GUI FPS
+        
+        # Performance tracking
+        start_time = time.time()
+        total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        print(f"Starting ultra-fast processing: {total_frames} frames to process")
         
         while self.is_playing:
             ret, frame = self.cap.read()
             if not ret:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                continue
+                # Video finished - show completion stats
+                elapsed_time = time.time() - start_time
+                fps_processed = processed_frames / elapsed_time if elapsed_time > 0 else 0
+                print(f"Processing completed in {elapsed_time:.1f}s")
+                print(f"Processed {processed_frames} frames at {fps_processed:.1f} FPS")
+                print(f"Video processing speed: {elapsed_time/60:.1f} minutes for {total_frames/original_fps/60:.1f} minute video")
+                break
             
             self.frame_count += 1
             frame_interval += 1
             
-            # Process every frame for maximum accuracy
-            # No frame skipping - process all frames
+            # Apply frame skipping for speed
+            if skip_frames > 0 and self.frame_count % (skip_frames + 1) != 0:
+                continue  # Skip this frame
             
             processed_frames += 1
             
-            # Run detection with optimized settings for speed
-            results = self.model(frame, classes=[2, 3, 5, 7], conf=conf_threshold, iou=0.4, imgsz=model_size, verbose=False)[0]
+            # Run detection with ultra-optimized settings for speed
+            results = self.model(frame, classes=[2, 3, 5, 7], conf=conf_threshold, iou=0.3, imgsz=model_size, verbose=False, max_det=20)[0]
             detections = sv.Detections.from_ultralytics(results)
             
             # Filter detections by size for better accuracy
@@ -769,18 +799,31 @@ class VehicleCountingGUI:
             # Process vehicle counting
             self.process_vehicle_counting(frame, detections)
             
-            # Optimized display update - less frequent updates for better performance
-            if processed_frames % display_skip == 0:
-                self.root.after(0, self.update_display, frame, detections)
+            # Display update based on GUI settings (optimized for speed)
+            current_time = time.time()
+            time_since_last_display = current_time - last_display_time
             
-            # Write annotated frame to output video (not the original frame)
+            # Update display less frequently for better performance
+            if (processed_frames % (display_skip * 2) == 0 and 
+                time_since_last_display >= (1.0 / (display_fps_limit * 0.5))):
+                self.root.after(0, self.update_display, frame, detections)
+                last_display_time = current_time
+                
+                # Show progress
+                progress = (self.frame_count / total_frames) * 100
+                elapsed = time.time() - start_time
+                estimated_total = elapsed / (progress / 100) if progress > 0 else 0
+                remaining = estimated_total - elapsed
+                self.status_var.set(f"Processing: {progress:.1f}% ({remaining:.1f}s remaining)")
+            
+            # Write annotated frame to output video (optimized for speed)
             if self.video_writer and self.video_writer.isOpened():
                 # Create annotated frame for output video
                 output_frame = self.create_annotated_frame(frame, detections)
                 self.video_writer.write(output_frame)
             
-            # Maintain original video speed for playback
-            time.sleep(frame_delay)
+            # No sleep for maximum processing speed
+            # time.sleep(frame_delay)  # Removed for ultra-fast processing
     
     def process_vehicle_counting(self, frame, detections):
         if len(detections) == 0:
@@ -804,32 +847,36 @@ class VehicleCountingGUI:
                 if vehicle_type == 'motorcycle' and (bbox[2] - bbox[0]) < 50:  # Small motorcycles
                     vehicle_type = 'moped'
                 
-                # Update vehicle information
-                self.vehicle_positions[tracker_id] = (center_x, center_y)
-                self.vehicle_types[tracker_id] = vehicle_type
+                # Assign unique vehicle ID
+                unique_vehicle_id = self.get_unique_vehicle_id(tracker_id)
                 
-                # Track vehicle path if enabled (optimized for speed)
+                # Update vehicle information
+                self.vehicle_positions[unique_vehicle_id] = (center_x, center_y)
+                self.vehicle_types[unique_vehicle_id] = vehicle_type
+                
+                # Track vehicle path if enabled (ultra-optimized for speed)
                 if self.path_tracking_var.get():
-                    if tracker_id not in self.vehicle_paths:
-                        self.vehicle_paths[tracker_id] = []
+                    if unique_vehicle_id not in self.vehicle_paths:
+                        self.vehicle_paths[unique_vehicle_id] = []
                     
-                    # Add current position to path (every 2nd frame for speed)
-                    if self.frame_count % 2 == 0:
-                        self.vehicle_paths[tracker_id].append((center_x, center_y))
+                    # Add current position to path (every 4th frame for maximum speed)
+                    if self.frame_count % 4 == 0:
+                        self.vehicle_paths[unique_vehicle_id].append((center_x, center_y))
                         
                         # Limit path history to prevent memory issues
-                        max_path_length = self.path_history_var.get()
-                        if len(self.vehicle_paths[tracker_id]) > max_path_length:
-                            self.vehicle_paths[tracker_id] = self.vehicle_paths[tracker_id][-max_path_length:]
+                        max_path_length = min(25, self.path_history_var.get())  # Cap at 25 for speed
+                        if len(self.vehicle_paths[unique_vehicle_id]) > max_path_length:
+                            self.vehicle_paths[unique_vehicle_id] = self.vehicle_paths[unique_vehicle_id][-max_path_length:]
                 
                 # Check line crossings with enhanced tracking
-                line_crossed, direction, from_line, to_line = self.check_line_crossings(tracker_id, center_x, center_y, vehicle_type, confidence)
+                line_crossed, direction, from_line, to_line = self.check_line_crossings(unique_vehicle_id, center_x, center_y, vehicle_type, confidence)
                 
-                # Log vehicle data to CSV in real-time
-                self.log_vehicle_data(
-                    self.frame_count, tracker_id, vehicle_type, confidence,
-                    center_x, center_y, bbox, line_crossed, direction, from_line, to_line
-                )
+                # Log vehicle data to CSV in real-time (optimized for speed)
+                if self.frame_count % 3 == 0:  # Log every 3rd frame for speed
+                    self.log_vehicle_data(
+                        self.frame_count, unique_vehicle_id, vehicle_type, confidence,
+                        center_x, center_y, bbox, line_crossed, direction, from_line, to_line
+                    )
     
     def check_line_crossings(self, tracker_id, center_x, center_y, vehicle_type, confidence):
         if tracker_id not in self.vehicle_positions:
@@ -851,6 +898,7 @@ class VehicleCountingGUI:
             
             # Check if vehicle crossed this line
             if self.line_crossed(prev_x, prev_y, center_x, center_y, x1, y1, x2, y2):
+                
                 if tracker_id not in self.crossed_vehicles[i]:
                     # Vehicle crossed line going forward (IN)
                     self.counts[line_name][vehicle_type] += 1
@@ -933,8 +981,11 @@ class VehicleCountingGUI:
                     class_id = int(detections.class_id[i]) if detections.class_id is not None else 2
                     confidence = detections.confidence[i] if detections.confidence is not None else 0.0
                     
+                    # Get unique vehicle ID
+                    unique_vehicle_id = self.get_unique_vehicle_id(tracker_id)
+                    
                     # Get vehicle type
-                    vehicle_type = self.vehicle_types.get(tracker_id, 'car')
+                    vehicle_type = self.vehicle_types.get(unique_vehicle_id, 'car')
                     
                     # Professional color scheme
                     type_colors = {
@@ -1064,6 +1115,82 @@ class VehicleCountingGUI:
             cv2.putText(frame, f"{line_name}: {counts['total']}", (20, y_offset), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
             y_offset += 15
+        
+        # Display settings info
+        y_offset += 10
+        cv2.putText(frame, f"Display Rate: {self.display_rate_var.get()}", (20, y_offset), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+        y_offset += 15
+        cv2.putText(frame, f"Display FPS: {self.display_fps_var.get()}", (20, y_offset), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+    
+    def get_unique_vehicle_id(self, tracker_id):
+        """Assign unique vehicle ID to each detected vehicle"""
+        if tracker_id not in self.vehicle_id_mapping:
+            # Check if this tracker_id was previously assigned (re-appeared vehicle)
+            for old_tracker_id, old_unique_id in self.vehicle_id_mapping.items():
+                if old_tracker_id == tracker_id:
+                    return old_unique_id
+            
+            # New vehicle - assign next available ID
+            unique_id = self.next_vehicle_id
+            self.vehicle_id_mapping[tracker_id] = unique_id
+            self.vehicle_first_seen[unique_id] = self.frame_count
+            self.next_vehicle_id += 1
+            
+            print(f"New vehicle detected: Tracker ID {tracker_id} -> Unique ID {unique_id}")
+        
+        return self.vehicle_id_mapping[tracker_id]
+    
+    def reset_tracking_data(self):
+        """Reset all tracking data for a new processing session"""
+        self.vehicle_positions.clear()
+        self.vehicle_types.clear()
+        self.vehicle_history.clear()
+        self.crossed_vehicles.clear()
+        self.line_crossings.clear()
+        self.vehicle_paths.clear()
+        self.vehicle_line_status.clear()
+        self.vehicle_id_mapping.clear()
+        self.vehicle_first_seen.clear()
+        self.next_vehicle_id = 1
+        self.frame_count = 0
+        
+        # Reset counts
+        for line_name in self.counts:
+            self.counts[line_name] = {'car': 0, 'motorcycle': 0, 'bus': 0, 'truck': 0, 'moped': 0, 'total': 0}
+        
+        print("Tracking data reset for new processing session")
+    
+    def on_display_settings_change(self, event=None):
+        """Handle changes to display settings"""
+        try:
+            display_rate = self.display_rate_var.get()
+            display_fps = self.display_fps_var.get()
+            
+            # Validate settings
+            if display_rate < 1:
+                self.display_rate_var.set(1)
+                display_rate = 1
+            elif display_rate > 30:
+                self.display_rate_var.set(30)
+                display_rate = 30
+                
+            if display_fps < 15:
+                self.display_fps_var.set(15)
+                display_fps = 15
+            elif display_fps > 60:
+                self.display_fps_var.set(60)
+                display_fps = 60
+            
+            # Update status to show current settings
+            self.status_var.set(f"Display: {display_rate} frames, {display_fps} FPS")
+            
+            # Log the change
+            print(f"Display settings updated: Rate={display_rate}, FPS={display_fps}")
+            
+        except Exception as e:
+            print(f"Error updating display settings: {e}")
     
     def get_previous_line_crossed(self, tracker_id, current_line):
         """Get the previous line crossed by the vehicle"""
@@ -1096,7 +1223,14 @@ class VehicleCountingGUI:
         C = (line_x1, line_y1)
         D = (line_x2, line_y2)
         
-        return ccw(A, C, D) != ccw(B, C, D) and ccw(A, B, C) != ccw(A, B, D)
+        # Check if lines intersect
+        if ccw(A, C, D) != ccw(B, C, D) and ccw(A, B, C) != ccw(A, B, D):
+            # Additional check: ensure the crossing is significant (not just a small movement)
+            distance = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+            if distance > 5:  # Minimum movement threshold
+                return True
+        
+        return False
     
     def update_display(self, frame, detections):
         if frame is None:
@@ -1113,8 +1247,11 @@ class VehicleCountingGUI:
                     class_id = int(detections.class_id[i]) if detections.class_id is not None else 2
                     confidence = detections.confidence[i] if detections.confidence is not None else 0.0
                     
+                    # Get unique vehicle ID
+                    unique_vehicle_id = self.get_unique_vehicle_id(tracker_id)
+                    
                     # Get vehicle type
-                    vehicle_type = self.vehicle_types.get(tracker_id, 'car')
+                    vehicle_type = self.vehicle_types.get(unique_vehicle_id, 'car')
                     
                     # Professional color scheme
                     type_colors = {
@@ -1286,6 +1423,12 @@ class VehicleCountingGUI:
         
         for vehicle_type, count in type_counts.items():
             analytics_text += f"{vehicle_type}: {count}\n"
+        
+        # Display settings
+        analytics_text += f"\nDisplay Settings:\n"
+        analytics_text += f"Update Rate: {self.display_rate_var.get()} frames\n"
+        analytics_text += f"Display FPS: {self.display_fps_var.get()}\n"
+        analytics_text += f"Processing Speed: {self.speed_var.get()}\n"
         
         # CSV logging status
         if self.csv_logging_var.get():
