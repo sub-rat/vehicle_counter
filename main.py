@@ -10,6 +10,8 @@ import supervision as sv
 from collections import defaultdict, deque
 import threading
 import time
+import csv
+from datetime import datetime
 
 class VehicleCountingGUI:
     def __init__(self, root):
@@ -36,6 +38,14 @@ class VehicleCountingGUI:
         self.vehicle_history = defaultdict(list)  # Vehicle crossing history
         self.crossed_vehicles = defaultdict(set)  # Vehicles that crossed each line
         self.line_crossings = defaultdict(list)  # Detailed crossing data
+        
+        # Multi-line tracking variables
+        self.vehicle_paths = defaultdict(list)  # Track vehicle movement paths
+        self.vehicle_line_status = defaultdict(dict)  # Track which lines each vehicle has crossed
+        self.csv_writer = None
+        self.csv_file = None
+        self.csv_path = None
+        self.real_time_data = []  # Store real-time data for CSV export
         
         # Colors for different lines
         self.line_colors = [
@@ -131,15 +141,17 @@ class VehicleCountingGUI:
         ttk.Button(left_panel, text="Load Configuration", command=self.load_config).pack(fill=tk.X, pady=5)
         ttk.Button(left_panel, text="Export Data", command=self.export_data).pack(fill=tk.X, pady=5)
         ttk.Button(left_panel, text="Save Processed Video", command=self.save_processed_video).pack(fill=tk.X, pady=5)
+        ttk.Button(left_panel, text="Start CSV Logging", command=self.start_csv_logging).pack(fill=tk.X, pady=5)
+        ttk.Button(left_panel, text="Stop CSV Logging", command=self.stop_csv_logging).pack(fill=tk.X, pady=5)
         
         # Performance settings
         perf_frame = ttk.LabelFrame(left_panel, text="Performance Settings")
         perf_frame.pack(fill=tk.X, pady=10)
         
-        ttk.Label(perf_frame, text="Skip Frames:").pack(anchor=tk.W)
-        self.skip_frames_var = tk.IntVar(value=3)
-        skip_spinbox = ttk.Spinbox(perf_frame, from_=0, to=30, textvariable=self.skip_frames_var, width=10)
-        skip_spinbox.pack(fill=tk.X, pady=2)
+        ttk.Label(perf_frame, text="Display Update Rate:").pack(anchor=tk.W)
+        self.display_rate_var = tk.IntVar(value=5)
+        display_spinbox = ttk.Spinbox(perf_frame, from_=1, to=30, textvariable=self.display_rate_var, width=10)
+        display_spinbox.pack(fill=tk.X, pady=2)
         
         ttk.Label(perf_frame, text="Confidence Threshold:").pack(anchor=tk.W, pady=(10, 0))
         self.conf_threshold_var = tk.DoubleVar(value=0.2)
@@ -155,6 +167,27 @@ class VehicleCountingGUI:
         self.speed_var = tk.StringVar(value="Ultra Fast")
         speed_combo = ttk.Combobox(perf_frame, textvariable=self.speed_var, values=["Ultra Fast", "Fast", "Normal", "Accurate"], state="readonly", width=10)
         speed_combo.pack(fill=tk.X, pady=2)
+        
+        # Add note about video speed
+        ttk.Label(perf_frame, text="Note: Video plays at original speed", 
+                 font=("Arial", 8), foreground="gray").pack(pady=2)
+        
+        # Multi-line tracking settings
+        tracking_frame = ttk.LabelFrame(left_panel, text="Multi-Line Tracking")
+        tracking_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Label(tracking_frame, text="Path Tracking:").pack(anchor=tk.W)
+        self.path_tracking_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(tracking_frame, text="Enable Vehicle Path Tracking", variable=self.path_tracking_var).pack(anchor=tk.W)
+        
+        ttk.Label(tracking_frame, text="CSV Logging:").pack(anchor=tk.W, pady=(10, 0))
+        self.csv_logging_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(tracking_frame, text="Enable Real-time CSV Logging", variable=self.csv_logging_var).pack(anchor=tk.W)
+        
+        ttk.Label(tracking_frame, text="Path History Length:").pack(anchor=tk.W, pady=(10, 0))
+        self.path_history_var = tk.IntVar(value=50)
+        path_spinbox = ttk.Spinbox(tracking_frame, from_=10, to=200, textvariable=self.path_history_var, width=10)
+        path_spinbox.pack(fill=tk.X, pady=2)
         
         ttk.Label(perf_frame, text="Min Vehicle Size:").pack(anchor=tk.W, pady=(10, 0))
         self.min_size_var = tk.IntVar(value=100)
@@ -233,6 +266,108 @@ class VehicleCountingGUI:
         if color[0]:
             self.current_color = tuple(int(c) for c in color[0])
             self.color_button.configure(text=f"Color: RGB{self.current_color}")
+    
+    def start_csv_logging(self):
+        """Start real-time CSV logging"""
+        if not self.counting_lines:
+            messagebox.showwarning("Warning", "Please add counting lines first")
+            return
+        
+        # Create output directory
+        os.makedirs("./output", exist_ok=True)
+        
+        # Create CSV file with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.csv_path = f"./output/vehicle_tracking_{timestamp}.csv"
+        
+        try:
+            self.csv_file = open(self.csv_path, 'w', newline='', encoding='utf-8')
+            self.csv_writer = csv.writer(self.csv_file)
+            
+            # Write CSV header
+            header = [
+                'Time', 'Frame', 'Vehicle_ID', 'Vehicle_Type', 'Confidence',
+                'Center_X', 'Center_Y', 'Bbox_X1', 'Bbox_Y1', 'Bbox_X2', 'Bbox_Y2',
+                'Line_Crossed', 'Direction', 'From_Line', 'To_Line', 'Path_Length',
+                'Lines_Crossed_Count', 'Current_Speed', 'Total_Distance'
+            ]
+            self.csv_writer.writerow(header)
+            self.csv_file.flush()
+            
+            self.csv_logging_var.set(True)
+            self.status_var.set(f"CSV logging started: {os.path.basename(self.csv_path)}")
+            messagebox.showinfo("Success", f"CSV logging started\nFile: {self.csv_path}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to start CSV logging: {e}")
+    
+    def stop_csv_logging(self):
+        """Stop real-time CSV logging"""
+        if self.csv_file:
+            self.csv_file.close()
+            self.csv_file = None
+            self.csv_writer = None
+            self.csv_logging_var.set(False)
+            self.status_var.set("CSV logging stopped")
+            messagebox.showinfo("Success", f"CSV logging stopped\nData saved to: {self.csv_path}")
+    
+    def log_vehicle_data(self, frame_num, tracker_id, vehicle_type, confidence, 
+                        center_x, center_y, bbox, line_crossed=None, direction=None, 
+                        from_line=None, to_line=None):
+        """Log vehicle data to CSV in real-time"""
+        if not self.csv_writer or not self.csv_logging_var.get():
+            return
+        
+        try:
+            # Calculate additional metrics (optimized for speed)
+            path_length = len(self.vehicle_paths.get(tracker_id, []))
+            lines_crossed_count = len(self.vehicle_line_status.get(tracker_id, {}))
+            
+            # Calculate current speed (distance from previous position) - simplified
+            current_speed = 0
+            total_distance = 0
+            if tracker_id in self.vehicle_paths and len(self.vehicle_paths[tracker_id]) > 1:
+                prev_pos = self.vehicle_paths[tracker_id][-2]
+                current_speed = np.sqrt((center_x - prev_pos[0])**2 + (center_y - prev_pos[1])**2)
+                
+                # Simplified total distance calculation (only last 10 points for speed)
+                path_points = self.vehicle_paths[tracker_id][-10:] if len(self.vehicle_paths[tracker_id]) > 10 else self.vehicle_paths[tracker_id]
+                for i in range(1, len(path_points)):
+                    prev = path_points[i-1]
+                    curr = path_points[i]
+                    total_distance += np.sqrt((curr[0] - prev[0])**2 + (curr[1] - prev[1])**2)
+            
+            # Write data to CSV (optimized format)
+            row = [
+                datetime.now().strftime("%H:%M:%S.%f")[:-3],  # Shorter timestamp
+                frame_num,
+                tracker_id,
+                vehicle_type,
+                f"{confidence:.2f}",  # Reduced precision
+                f"{center_x:.0f}",    # Integer coordinates for speed
+                f"{center_y:.0f}",
+                f"{bbox[0]:.0f}",
+                f"{bbox[1]:.0f}",
+                f"{bbox[2]:.0f}",
+                f"{bbox[3]:.0f}",
+                line_crossed or "",
+                direction or "",
+                from_line or "",
+                to_line or "",
+                path_length,
+                lines_crossed_count,
+                f"{current_speed:.0f}",  # Integer speed
+                f"{total_distance:.0f}"  # Integer distance
+            ]
+            
+            self.csv_writer.writerow(row)
+            
+            # Flush every 10 rows for better performance
+            if frame_num % 10 == 0:
+                self.csv_file.flush()
+            
+        except Exception as e:
+            print(f"Error logging to CSV: {e}")
     
     def load_video(self):
         file_path = filedialog.askopenfilename(
@@ -532,8 +667,12 @@ class VehicleCountingGUI:
             messagebox.showerror("Error", "Could not initialize video writer")
             return
         
+        # Auto-start CSV logging if enabled
+        if self.csv_logging_var.get() and not self.csv_writer:
+            self.start_csv_logging()
+        
         self.is_playing = True
-        self.status_var.set("Processing...")
+        self.status_var.set("Processing at 2x speed...")
         
         # Start processing in separate thread
         self.processing_thread = threading.Thread(target=self.process_video)
@@ -554,28 +693,41 @@ class VehicleCountingGUI:
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         
         # Performance optimization settings
-        skip_frames = self.skip_frames_var.get()  # Get from GUI
+        display_rate = self.display_rate_var.get()  # Get from GUI
         display_fps = self.display_fps_var.get()  # Get from GUI
         speed_mode = self.speed_var.get()  # Get speed mode
         min_size = self.min_size_var.get()  # Get minimum vehicle size
         
-        # Adjust settings based on speed mode
+        # Video playback settings - play at 2x speed
+        original_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        target_fps = original_fps * 2  # 2x speed
+        frame_delay = 1.0 / target_fps if target_fps > 0 else 1.0 / 60.0  # 2x faster than original
+        
+        # Adjust settings based on speed mode - optimized for 2x speed
         if speed_mode == "Ultra Fast":
-            skip_frames = max(skip_frames, 5)
+            skip_frames = 0  # Process every frame
             conf_threshold = 0.15
             min_area = min_size
+            model_size = 416  # Smaller input size for maximum speed
+            display_skip = 2  # Update display every 2 frames
         elif speed_mode == "Fast":
-            skip_frames = max(skip_frames, 3)
+            skip_frames = 0  # Process every frame
             conf_threshold = 0.2
             min_area = min_size
+            model_size = 480  # Smaller input size for speed
+            display_skip = 3  # Update display every 3 frames
         elif speed_mode == "Normal":
-            skip_frames = max(skip_frames, 1)
+            skip_frames = 0  # Process every frame
             conf_threshold = 0.3
             min_area = min_size
+            model_size = 640
+            display_skip = 4  # Update display every 4 frames
         else:  # Accurate
-            skip_frames = max(skip_frames, 0)
+            skip_frames = 0  # Process every frame
             conf_threshold = 0.4
             min_area = min_size
+            model_size = 640
+            display_skip = 5  # Update display every 5 frames
         
         frame_interval = 0
         last_display_time = time.time()
@@ -591,14 +743,13 @@ class VehicleCountingGUI:
             self.frame_count += 1
             frame_interval += 1
             
-            # Skip frames for faster processing
-            if frame_interval % (skip_frames + 1) != 0:
-                continue
+            # Process every frame for maximum accuracy
+            # No frame skipping - process all frames
             
             processed_frames += 1
             
-            # Run detection with optimized settings
-            results = self.model(frame, classes=[2, 3, 5, 7], conf=conf_threshold, iou=0.4)[0]  # Lower IOU for better detection
+            # Run detection with optimized settings for speed
+            results = self.model(frame, classes=[2, 3, 5, 7], conf=conf_threshold, iou=0.4, imgsz=model_size, verbose=False)[0]
             detections = sv.Detections.from_ultralytics(results)
             
             # Filter detections by size for better accuracy
@@ -618,19 +769,18 @@ class VehicleCountingGUI:
             # Process vehicle counting
             self.process_vehicle_counting(frame, detections)
             
-            # Smooth display update
-            if processed_frames % display_interval == 0:
+            # Optimized display update - less frequent updates for better performance
+            if processed_frames % display_skip == 0:
                 self.root.after(0, self.update_display, frame, detections)
             
-            # Write frame to output video
+            # Write annotated frame to output video (not the original frame)
             if self.video_writer and self.video_writer.isOpened():
-                self.video_writer.write(frame)
+                # Create annotated frame for output video
+                output_frame = self.create_annotated_frame(frame, detections)
+                self.video_writer.write(output_frame)
             
-            # No sleep for maximum speed - let the system handle timing
-            if speed_mode == "Ultra Fast":
-                pass  # No sleep for ultra-fast mode
-            else:
-                time.sleep(0.001)  # Minimal delay for other modes
+            # Maintain original video speed for playback
+            time.sleep(frame_delay)
     
     def process_vehicle_counting(self, frame, detections):
         if len(detections) == 0:
@@ -639,7 +789,7 @@ class VehicleCountingGUI:
         # Vehicle class mapping
         class_names = {2: 'car', 3: 'motorcycle', 5: 'bus', 7: 'truck'}
         
-        # Process each vehicle (enhanced)
+        # Process each vehicle (enhanced with path tracking)
         for i, tracker_id in enumerate(detections.tracker_id):
             if tracker_id is not None:
                 bbox = detections.xyxy[i]
@@ -658,14 +808,42 @@ class VehicleCountingGUI:
                 self.vehicle_positions[tracker_id] = (center_x, center_y)
                 self.vehicle_types[tracker_id] = vehicle_type
                 
-                # Check line crossings
-                self.check_line_crossings(tracker_id, center_x, center_y, vehicle_type, confidence)
+                # Track vehicle path if enabled (optimized for speed)
+                if self.path_tracking_var.get():
+                    if tracker_id not in self.vehicle_paths:
+                        self.vehicle_paths[tracker_id] = []
+                    
+                    # Add current position to path (every 2nd frame for speed)
+                    if self.frame_count % 2 == 0:
+                        self.vehicle_paths[tracker_id].append((center_x, center_y))
+                        
+                        # Limit path history to prevent memory issues
+                        max_path_length = self.path_history_var.get()
+                        if len(self.vehicle_paths[tracker_id]) > max_path_length:
+                            self.vehicle_paths[tracker_id] = self.vehicle_paths[tracker_id][-max_path_length:]
+                
+                # Check line crossings with enhanced tracking
+                line_crossed, direction, from_line, to_line = self.check_line_crossings(tracker_id, center_x, center_y, vehicle_type, confidence)
+                
+                # Log vehicle data to CSV in real-time
+                self.log_vehicle_data(
+                    self.frame_count, tracker_id, vehicle_type, confidence,
+                    center_x, center_y, bbox, line_crossed, direction, from_line, to_line
+                )
     
     def check_line_crossings(self, tracker_id, center_x, center_y, vehicle_type, confidence):
         if tracker_id not in self.vehicle_positions:
-            return
+            return None, None, None, None
         
         prev_x, prev_y = self.vehicle_positions[tracker_id]
+        line_crossed = None
+        direction = None
+        from_line = None
+        to_line = None
+        
+        # Initialize vehicle line status if not exists
+        if tracker_id not in self.vehicle_line_status:
+            self.vehicle_line_status[tracker_id] = {}
         
         for i, line in enumerate(self.counting_lines):
             x1, y1, x2, y2 = line['coords']
@@ -674,10 +852,17 @@ class VehicleCountingGUI:
             # Check if vehicle crossed this line
             if self.line_crossed(prev_x, prev_y, center_x, center_y, x1, y1, x2, y2):
                 if tracker_id not in self.crossed_vehicles[i]:
-                    # Vehicle crossed line going forward
+                    # Vehicle crossed line going forward (IN)
                     self.counts[line_name][vehicle_type] += 1
                     self.counts[line_name]['total'] += 1
                     self.crossed_vehicles[i].add(tracker_id)
+                    
+                    # Update vehicle line status
+                    self.vehicle_line_status[tracker_id][line_name] = 'IN'
+                    
+                    # Determine from_line (previous line crossed)
+                    from_line = self.get_previous_line_crossed(tracker_id, line_name)
+                    to_line = line_name
                     
                     # Record crossing details
                     crossing_data = {
@@ -686,17 +871,30 @@ class VehicleCountingGUI:
                         'vehicle_type': vehicle_type,
                         'confidence': confidence,
                         'direction': 'IN',
-                        'line_name': line_name
+                        'line_name': line_name,
+                        'from_line': from_line,
+                        'to_line': to_line
                     }
                     self.line_crossings[line_name].append(crossing_data)
                     self.vehicle_history[tracker_id].append(crossing_data)
                     
-                    print(f"Vehicle {tracker_id} ({vehicle_type}) crossed {line_name} IN")
+                    line_crossed = line_name
+                    direction = 'IN'
+                    
+                    print(f"Vehicle {tracker_id} ({vehicle_type}) crossed {line_name} IN (from {from_line or 'start'})")
                 else:
-                    # Vehicle crossed line going backward
+                    # Vehicle crossed line going backward (OUT)
                     self.counts[line_name][vehicle_type] += 1
                     self.counts[line_name]['total'] += 1
                     self.crossed_vehicles[i].discard(tracker_id)
+                    
+                    # Update vehicle line status
+                    if line_name in self.vehicle_line_status[tracker_id]:
+                        del self.vehicle_line_status[tracker_id][line_name]
+                    
+                    # Determine from_line and to_line
+                    from_line = line_name
+                    to_line = self.get_next_line_crossed(tracker_id, line_name)
                     
                     # Record crossing details
                     crossing_data = {
@@ -705,12 +903,188 @@ class VehicleCountingGUI:
                         'vehicle_type': vehicle_type,
                         'confidence': confidence,
                         'direction': 'OUT',
-                        'line_name': line_name
+                        'line_name': line_name,
+                        'from_line': from_line,
+                        'to_line': to_line
                     }
                     self.line_crossings[line_name].append(crossing_data)
                     self.vehicle_history[tracker_id].append(crossing_data)
                     
-                    print(f"Vehicle {tracker_id} ({vehicle_type}) crossed {line_name} OUT")
+                    line_crossed = line_name
+                    direction = 'OUT'
+                    
+                    print(f"Vehicle {tracker_id} ({vehicle_type}) crossed {line_name} OUT (to {to_line or 'end'})")
+        
+        return line_crossed, direction, from_line, to_line
+    
+    def create_annotated_frame(self, frame, detections):
+        """Create annotated frame for output video with all tracking data"""
+        if frame is None:
+            return frame
+        
+        # Create a copy of the frame for annotation
+        annotated_frame = frame.copy()
+        
+        # Draw vehicle detections with professional bounding boxes
+        if detections is not None and len(detections) > 0:
+            for i, tracker_id in enumerate(detections.tracker_id):
+                if tracker_id is not None:
+                    bbox = detections.xyxy[i]
+                    class_id = int(detections.class_id[i]) if detections.class_id is not None else 2
+                    confidence = detections.confidence[i] if detections.confidence is not None else 0.0
+                    
+                    # Get vehicle type
+                    vehicle_type = self.vehicle_types.get(tracker_id, 'car')
+                    
+                    # Professional color scheme
+                    type_colors = {
+                        'car': (0, 150, 255),      # Orange
+                        'motorcycle': (255, 50, 50),   # Red
+                        'bus': (255, 0, 255),      # Magenta
+                        'truck': (0, 255, 255),    # Cyan
+                        'moped': (255, 255, 0)     # Yellow
+                    }
+                    color = type_colors.get(vehicle_type, (0, 150, 255))
+                    
+                    # Draw professional bounding box
+                    x1, y1, x2, y2 = map(int, bbox)
+                    
+                    # Draw filled rectangle with transparency effect
+                    overlay = annotated_frame.copy()
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+                    cv2.addWeighted(overlay, 0.3, annotated_frame, 0.7, 0, annotated_frame)
+                    
+                    # Draw border
+                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+                    
+                    # Draw professional label with background
+                    label = f"{tracker_id} | {vehicle_type.upper()} | {confidence:.1f}"
+                    (label_width, label_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    
+                    # Draw label background
+                    cv2.rectangle(annotated_frame, (x1, y1 - label_height - 10), 
+                                (x1 + label_width + 10, y1), color, -1)
+                    cv2.rectangle(annotated_frame, (x1, y1 - label_height - 10), 
+                                (x1 + label_width + 10, y1), (255, 255, 255), 1)
+                    
+                    # Draw label text
+                    cv2.putText(annotated_frame, label, (x1 + 5, y1 - 5), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    
+                    # Draw vehicle path if enabled
+                    if self.path_tracking_var.get() and tracker_id in self.vehicle_paths:
+                        path = self.vehicle_paths[tracker_id]
+                        if len(path) > 1:
+                            # Draw path with fading effect
+                            for j in range(1, len(path)):
+                                alpha = j / len(path)  # Fade from transparent to solid
+                                path_color = (int(color[0] * alpha), int(color[1] * alpha), int(color[2] * alpha))
+                                cv2.line(annotated_frame, 
+                                       (int(path[j-1][0]), int(path[j-1][1])), 
+                                       (int(path[j][0]), int(path[j][1])), 
+                                       path_color, 2)
+                    
+                    # Draw multi-line status if vehicle has crossed multiple lines
+                    if tracker_id in self.vehicle_line_status and len(self.vehicle_line_status[tracker_id]) > 0:
+                        lines_crossed = list(self.vehicle_line_status[tracker_id].keys())
+                        status_text = f"Lines: {', '.join(lines_crossed)}"
+                        (status_width, status_height), _ = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+                        
+                        # Draw status background
+                        cv2.rectangle(annotated_frame, (x1, y2), 
+                                    (x1 + status_width + 10, y2 + status_height + 10), (0, 0, 0), -1)
+                        cv2.rectangle(annotated_frame, (x1, y2), 
+                                    (x1 + status_width + 10, y2 + status_height + 10), color, 1)
+                        
+                        # Draw status text
+                        cv2.putText(annotated_frame, status_text, (x1 + 5, y2 + status_height + 5), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        # Draw professional counting lines
+        for line in self.counting_lines:
+            x1, y1, x2, y2 = line['coords']
+            color = line['color']
+            
+            # Draw line with shadow effect
+            cv2.line(annotated_frame, (int(x1)+2, int(y1)+2), (int(x2)+2, int(y2)+2), (0, 0, 0), 4)
+            cv2.line(annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 3)
+            
+            # Draw professional line label
+            label = f" {line['name']} "
+            (label_width, label_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+            
+            # Draw label background
+            cv2.rectangle(annotated_frame, (int(x1), int(y1) - label_height - 15), 
+                        (int(x1) + label_width + 10, int(y1) - 5), color, -1)
+            cv2.rectangle(annotated_frame, (int(x1), int(y1) - label_height - 15), 
+                        (int(x1) + label_width + 10, int(y1) - 5), (255, 255, 255), 1)
+            
+            # Draw label text
+            cv2.putText(annotated_frame, label, (int(x1) + 5, int(y1) - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        
+        # Add statistics overlay
+        self.add_statistics_overlay(annotated_frame)
+        
+        return annotated_frame
+    
+    def add_statistics_overlay(self, frame):
+        """Add statistics overlay to the frame"""
+        # Background for statistics
+        overlay_height = 200
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (10, 10), (400, overlay_height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+        cv2.rectangle(frame, (10, 10), (400, overlay_height), (255, 255, 255), 2)
+        
+        # Add statistics text
+        y_offset = 35
+        cv2.putText(frame, "Vehicle Tracking Statistics", (20, y_offset), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        y_offset += 30
+        
+        # Total vehicles tracked
+        cv2.putText(frame, f"Vehicles Tracked: {len(self.vehicle_positions)}", (20, y_offset), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        y_offset += 20
+        
+        # Frame count
+        cv2.putText(frame, f"Frame: {self.frame_count}", (20, y_offset), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        y_offset += 20
+        
+        # CSV logging status
+        csv_status = "ACTIVE" if self.csv_logging_var.get() else "INACTIVE"
+        cv2.putText(frame, f"CSV Logging: {csv_status}", (20, y_offset), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0) if csv_status == "ACTIVE" else (0, 0, 255), 1)
+        y_offset += 20
+        
+        # Line counts
+        for i, (line_name, counts) in enumerate(list(self.counts.items())[:3]):  # Show first 3 lines
+            cv2.putText(frame, f"{line_name}: {counts['total']}", (20, y_offset), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            y_offset += 15
+    
+    def get_previous_line_crossed(self, tracker_id, current_line):
+        """Get the previous line crossed by the vehicle"""
+        if tracker_id in self.vehicle_history:
+            # Look for the most recent crossing before current line
+            for crossing in reversed(self.vehicle_history[tracker_id]):
+                if crossing['line_name'] != current_line:
+                    return crossing['line_name']
+        return None
+    
+    def get_next_line_crossed(self, tracker_id, current_line):
+        """Get the next line that the vehicle might cross"""
+        # This is a simplified approach - in a real scenario, you might want to
+        # predict based on vehicle direction and available lines
+        crossed_lines = set()
+        if tracker_id in self.vehicle_line_status:
+            crossed_lines = set(self.vehicle_line_status[tracker_id].keys())
+        
+        # Return the next line in the sequence (if any)
+        available_lines = [line['name'] for line in self.counting_lines if line['name'] not in crossed_lines]
+        return available_lines[0] if available_lines else None
     
     def line_crossed(self, x1, y1, x2, y2, line_x1, line_y1, line_x2, line_y2):
         """Check if line segment (x1,y1)-(x2,y2) crosses line (line_x1,line_y1)-(line_x2,line_y2)"""
@@ -776,6 +1150,35 @@ class VehicleCountingGUI:
                     # Draw label text
                     cv2.putText(annotated_frame, label, (x1 + 5, y1 - 5), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    
+                    # Draw vehicle path if enabled
+                    if self.path_tracking_var.get() and tracker_id in self.vehicle_paths:
+                        path = self.vehicle_paths[tracker_id]
+                        if len(path) > 1:
+                            # Draw path with fading effect
+                            for j in range(1, len(path)):
+                                alpha = j / len(path)  # Fade from transparent to solid
+                                path_color = (int(color[0] * alpha), int(color[1] * alpha), int(color[2] * alpha))
+                                cv2.line(annotated_frame, 
+                                       (int(path[j-1][0]), int(path[j-1][1])), 
+                                       (int(path[j][0]), int(path[j][1])), 
+                                       path_color, 2)
+                    
+                    # Draw multi-line status if vehicle has crossed multiple lines
+                    if tracker_id in self.vehicle_line_status and len(self.vehicle_line_status[tracker_id]) > 0:
+                        lines_crossed = list(self.vehicle_line_status[tracker_id].keys())
+                        status_text = f"Lines: {', '.join(lines_crossed)}"
+                        (status_width, status_height), _ = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+                        
+                        # Draw status background
+                        cv2.rectangle(annotated_frame, (x1, y2), 
+                                    (x1 + status_width + 10, y2 + status_height + 10), (0, 0, 0), -1)
+                        cv2.rectangle(annotated_frame, (x1, y2), 
+                                    (x1 + status_width + 10, y2 + status_height + 10), color, 1)
+                        
+                        # Draw status text
+                        cv2.putText(annotated_frame, status_text, (x1 + 5, y2 + status_height + 5), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         
         # Draw professional counting lines
         for line in self.counting_lines:
@@ -855,6 +1258,27 @@ class VehicleCountingGUI:
             vehicle_type = self.vehicle_types.get(vehicle_id, 'unknown')
             analytics_text += f"Vehicle {vehicle_id} ({vehicle_type}): {', '.join(lines)}\n"
         
+        # Path analysis
+        analytics_text += "\nPath Analysis:\n"
+        total_paths = len(self.vehicle_paths)
+        avg_path_length = sum(len(path) for path in self.vehicle_paths.values()) / max(1, total_paths)
+        analytics_text += f"Total vehicles with paths: {total_paths}\n"
+        analytics_text += f"Average path length: {avg_path_length:.1f} points\n"
+        
+        # Line crossing patterns
+        analytics_text += "\nLine Crossing Patterns:\n"
+        line_patterns = defaultdict(int)
+        for vehicle_id, history in self.vehicle_history.items():
+            if len(history) >= 2:
+                pattern = []
+                for crossing in history:
+                    pattern.append(f"{crossing['line_name']}({crossing['direction']})")
+                pattern_str = " -> ".join(pattern)
+                line_patterns[pattern_str] += 1
+        
+        for pattern, count in sorted(line_patterns.items(), key=lambda x: x[1], reverse=True)[:5]:
+            analytics_text += f"{pattern}: {count} vehicles\n"
+        
         analytics_text += "\nVehicle Type Distribution:\n"
         type_counts = defaultdict(int)
         for vehicle_type in self.vehicle_types.values():
@@ -862,6 +1286,14 @@ class VehicleCountingGUI:
         
         for vehicle_type, count in type_counts.items():
             analytics_text += f"{vehicle_type}: {count}\n"
+        
+        # CSV logging status
+        if self.csv_logging_var.get():
+            analytics_text += f"\nCSV Logging: ACTIVE\n"
+            if self.csv_path:
+                analytics_text += f"File: {os.path.basename(self.csv_path)}\n"
+        else:
+            analytics_text += f"\nCSV Logging: INACTIVE\n"
         
         self.analytics_text.delete(1.0, tk.END)
         self.analytics_text.insert(1.0, analytics_text)
@@ -920,7 +1352,7 @@ class VehicleCountingGUI:
         crossings_path = f"./output/crossings_{timestamp}.csv"
         with open(crossings_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Timestamp', 'Vehicle ID', 'Vehicle Type', 'Line Name', 'Direction', 'Confidence'])
+            writer.writerow(['Timestamp', 'Vehicle ID', 'Vehicle Type', 'Line Name', 'Direction', 'From Line', 'To Line', 'Confidence'])
             for line_name, crossings in self.line_crossings.items():
                 for crossing in crossings:
                     writer.writerow([
@@ -929,10 +1361,44 @@ class VehicleCountingGUI:
                         crossing['vehicle_type'],
                         crossing['line_name'],
                         crossing['direction'],
+                        crossing.get('from_line', ''),
+                        crossing.get('to_line', ''),
                         crossing['confidence']
                     ])
         
-        messagebox.showinfo("Success", f"Data exported successfully!\n\nJSON: {json_path}\nSummary CSV: {csv_path}\nCrossings CSV: {crossings_path}")
+        # Export vehicle paths CSV
+        paths_path = f"./output/vehicle_paths_{timestamp}.csv"
+        with open(paths_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Vehicle ID', 'Vehicle Type', 'Path Point', 'X', 'Y', 'Timestamp'])
+            for vehicle_id, path in self.vehicle_paths.items():
+                vehicle_type = self.vehicle_types.get(vehicle_id, 'unknown')
+                for i, (x, y) in enumerate(path):
+                    writer.writerow([vehicle_id, vehicle_type, i, x, y, time.time()])
+        
+        # Export multi-line analysis CSV
+        multi_line_path = f"./output/multi_line_analysis_{timestamp}.csv"
+        with open(multi_line_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Vehicle ID', 'Vehicle Type', 'Lines Crossed', 'Crossing Pattern', 'Total Distance', 'Path Length'])
+            for vehicle_id, history in self.vehicle_history.items():
+                if len(history) > 1:
+                    vehicle_type = self.vehicle_types.get(vehicle_id, 'unknown')
+                    lines_crossed = set(crossing['line_name'] for crossing in history)
+                    pattern = " -> ".join([f"{crossing['line_name']}({crossing['direction']})" for crossing in history])
+                    
+                    # Calculate total distance
+                    total_distance = 0
+                    if vehicle_id in self.vehicle_paths and len(self.vehicle_paths[vehicle_id]) > 1:
+                        for i in range(1, len(self.vehicle_paths[vehicle_id])):
+                            prev = self.vehicle_paths[vehicle_id][i-1]
+                            curr = self.vehicle_paths[vehicle_id][i]
+                            total_distance += np.sqrt((curr[0] - prev[0])**2 + (curr[1] - prev[1])**2)
+                    
+                    path_length = len(self.vehicle_paths.get(vehicle_id, []))
+                    writer.writerow([vehicle_id, vehicle_type, len(lines_crossed), pattern, f"{total_distance:.1f}", path_length])
+        
+        messagebox.showinfo("Success", f"Data exported successfully!\n\nJSON: {json_path}\nSummary CSV: {csv_path}\nCrossings CSV: {crossings_path}\nPaths CSV: {paths_path}\nMulti-line Analysis: {multi_line_path}")
     
     def save_processed_video(self):
         """Save the current processed video"""
@@ -959,6 +1425,14 @@ class VehicleCountingGUI:
 def main():
     root = tk.Tk()
     app = VehicleCountingGUI(root)
+    
+    # Add cleanup function for CSV logging
+    def on_closing():
+        if app.csv_file:
+            app.stop_csv_logging()
+        root.destroy()
+    
+    root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
 
 if __name__ == "__main__":
