@@ -208,8 +208,8 @@ class VehicleCountingGUI:
         path_spinbox.pack(fill=tk.X, pady=2)
         
         ttk.Label(perf_frame, text="Min Vehicle Size:").pack(anchor=tk.W, pady=(10, 0))
-        self.min_size_var = tk.IntVar(value=100)
-        size_spinbox = ttk.Spinbox(perf_frame, from_=50, to=500, increment=25, textvariable=self.min_size_var, width=10)
+        self.min_size_var = tk.IntVar(value=50)  # Lowered default for better detection of small/far vehicles
+        size_spinbox = ttk.Spinbox(perf_frame, from_=20, to=500, increment=10, textvariable=self.min_size_var, width=10)
         size_spinbox.pack(fill=tk.X, pady=2)
         
         ttk.Label(perf_frame, text="Model Type:").pack(anchor=tk.W, pady=(10, 0))
@@ -296,18 +296,18 @@ class VehicleCountingGUI:
         
         # Create CSV file with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.csv_path = f"./output/vehicle_tracking_{timestamp}.csv"
+        self.csv_path = f"./output/vehicle_crossings_{timestamp}.csv"  # Changed name to reflect crossings only
         
         try:
             self.csv_file = open(self.csv_path, 'w', newline='', encoding='utf-8')
             self.csv_writer = csv.writer(self.csv_file)
             
-            # Write CSV header
+            # Adjusted CSV header for crossings only
             header = [
                 'Time', 'Frame', 'Vehicle_ID', 'Vehicle_Type', 'Confidence',
+                'Line_Crossed', 'Direction', 'From_Line', 'To_Line',
                 'Center_X', 'Center_Y', 'Bbox_X1', 'Bbox_Y1', 'Bbox_X2', 'Bbox_Y2',
-                'Line_Crossed', 'Direction', 'From_Line', 'To_Line', 'Path_Length',
-                'Lines_Crossed_Count', 'Current_Speed', 'Total_Distance'
+                'Path_Length', 'Lines_Crossed_Count', 'Current_Speed', 'Total_Distance'
             ]
             self.csv_writer.writerow(header)
             self.csv_file.flush()
@@ -332,57 +332,53 @@ class VehicleCountingGUI:
     def log_vehicle_data(self, frame_num, tracker_id, vehicle_type, confidence, 
                         center_x, center_y, bbox, line_crossed=None, direction=None, 
                         from_line=None, to_line=None):
-        """Log vehicle data to CSV in real-time"""
+        """Log vehicle data to CSV only on line crossings"""
         if not self.csv_writer or not self.csv_logging_var.get():
             return
         
         try:
-            # Calculate additional metrics (optimized for speed)
+            # Calculate additional metrics
             path_length = len(self.vehicle_paths.get(tracker_id, []))
             lines_crossed_count = len(self.vehicle_line_status.get(tracker_id, {}))
             
-            # Calculate current speed (distance from previous position) - simplified
+            # Calculate current speed and total distance
             current_speed = 0
             total_distance = 0
             if tracker_id in self.vehicle_paths and len(self.vehicle_paths[tracker_id]) > 1:
                 prev_pos = self.vehicle_paths[tracker_id][-2]
                 current_speed = np.sqrt((center_x - prev_pos[0])**2 + (center_y - prev_pos[1])**2)
                 
-                # Simplified total distance calculation (only last 10 points for speed)
-                path_points = self.vehicle_paths[tracker_id][-10:] if len(self.vehicle_paths[tracker_id]) > 10 else self.vehicle_paths[tracker_id]
+                path_points = self.vehicle_paths[tracker_id]
                 for i in range(1, len(path_points)):
                     prev = path_points[i-1]
                     curr = path_points[i]
                     total_distance += np.sqrt((curr[0] - prev[0])**2 + (curr[1] - prev[1])**2)
             
-            # Write data to CSV (optimized format)
+            # Write data to CSV
             row = [
-                datetime.now().strftime("%H:%M:%S.%f")[:-3],  # Shorter timestamp
+                datetime.now().strftime("%H:%M:%S.%f")[:-3],
                 frame_num,
                 tracker_id,
                 vehicle_type,
-                f"{confidence:.2f}",  # Reduced precision
-                f"{center_x:.0f}",    # Integer coordinates for speed
+                f"{confidence:.2f}",
+                line_crossed or "",
+                direction or "",
+                from_line or "",
+                to_line or "",
+                f"{center_x:.0f}",
                 f"{center_y:.0f}",
                 f"{bbox[0]:.0f}",
                 f"{bbox[1]:.0f}",
                 f"{bbox[2]:.0f}",
                 f"{bbox[3]:.0f}",
-                line_crossed or "",
-                direction or "",
-                from_line or "",
-                to_line or "",
                 path_length,
                 lines_crossed_count,
-                f"{current_speed:.0f}",  # Integer speed
-                f"{total_distance:.0f}"  # Integer distance
+                f"{current_speed:.0f}",
+                f"{total_distance:.0f}"
             ]
             
             self.csv_writer.writerow(row)
-            
-            # Flush every 50 rows for better performance
-            if frame_num % 50 == 0:
-                self.csv_file.flush()
+            self.csv_file.flush()  # Flush immediately since crossings are infrequent
             
         except Exception as e:
             print(f"Error logging to CSV: {e}")
@@ -742,7 +738,7 @@ class VehicleCountingGUI:
             model_size = 480
         else:  # Accurate
             skip_frames = 0  # Process every frame
-            conf_threshold = 0.4
+            conf_threshold = 0.25  # Slightly lowered for better detection
             min_area = min_size
             model_size = 640
         
@@ -782,8 +778,8 @@ class VehicleCountingGUI:
             
             processed_frames += 1
             
-            # Run detection with ultra-optimized settings for speed
-            results = self.model(frame, classes=[2, 3, 5, 7], conf=conf_threshold, iou=0.3, imgsz=model_size, verbose=False, max_det=20)[0]
+            # Run detection with optimized settings
+            results = self.model(frame, classes=[2, 3, 5, 7], conf=conf_threshold, iou=0.45, imgsz=model_size, verbose=False, max_det=50)[0]  # Increased max_det, adjusted iou
             detections = sv.Detections.from_ultralytics(results)
             
             # Filter detections by size for better accuracy
@@ -847,7 +843,7 @@ class VehicleCountingGUI:
                 
                 # Determine vehicle type
                 vehicle_type = class_names.get(class_id, 'car')
-                if vehicle_type == 'motorcycle' and (bbox[2] - bbox[0]) < 50:  # Small motorcycles
+                if vehicle_type == 'motorcycle' and (bbox[2] - bbox[0]) < 80:  # Increased threshold for moped classification
                     vehicle_type = 'moped'
                 
                 # Assign unique vehicle ID
@@ -863,8 +859,8 @@ class VehicleCountingGUI:
                         unique_vehicle_id, center_x, center_y, vehicle_type, confidence
                     )
                 
-                # Log vehicle data to CSV in real-time (optimized for speed)
-                if self.frame_count % 3 == 0:  # Log every 3rd frame for speed
+                # Log only on crossings
+                if line_crossed is not None:
                     self.log_vehicle_data(
                         self.frame_count, unique_vehicle_id, vehicle_type, confidence,
                         center_x, center_y, bbox, line_crossed, direction, from_line, to_line
@@ -1372,7 +1368,7 @@ class VehicleCountingGUI:
                         crossing['confidence']
                     ])
         
-        # Export vehicle paths CSV
+        # Export vehicle paths CSV (optional, since not frame-by-frame)
         paths_path = f"./output/vehicle_paths_{timestamp}.csv"
         with open(paths_path, 'w', newline='') as f:
             writer = csv.writer(f)
